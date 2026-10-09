@@ -22,6 +22,13 @@ class PolicyError(Exception):
     """A spend or transition the mandate does not allow."""
 
 
+def require_cents(value: object) -> int:
+    # bool is a subclass of int; True would otherwise fund as 1 cent.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise PolicyError("amount must be an integer number of cents")
+    return value
+
+
 @dataclass
 class Mandate:
     agent_id: str
@@ -33,6 +40,9 @@ class Mandate:
     frozen: bool = False
 
     def __post_init__(self) -> None:
+        require_cents(self.max_per_job_cents)
+        require_cents(self.max_daily_cents)
+        require_cents(self.approval_above_cents)
         if self.max_per_job_cents < 0 or self.max_daily_cents < 0:
             raise PolicyError("caps cannot be negative")
         if self.approval_above_cents < 0:
@@ -48,6 +58,7 @@ class SkillListing:
     terms: str
 
     def __post_init__(self) -> None:
+        require_cents(self.price_cents)
         if self.price_cents < 0:
             raise PolicyError("price cannot be negative")
 

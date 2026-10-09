@@ -9,7 +9,7 @@ No real funds move. Amounts are integer cents so a later adapter can map them to
 ## What it enforces
 
 - A principal owns the mandate. The agent cannot raise its own cap.
-- Per-job cap, daily cap, payee allow-list, and a freeze switch are hard refusals, not prompt text.
+- Per-job cap, daily cap, payee allow-list, and a freeze switch are hard refusals, not prompt text. Funding checks the daily cap again. The day is `YYYY-MM-DD`.
 - Jobs over the approval threshold cannot be funded until the principal approves.
 - Escrow runs open, funded, delivered, then released, refunded, or resolved.
 - Reputation ignores anything that is not settled.

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
+from datetime import date
 from typing import Optional
 
 from agent_ledger.models import (
@@ -12,7 +14,20 @@ from agent_ledger.models import (
     PolicyError,
     Reputation,
     SkillListing,
+    require_cents,
 )
+
+_CANONICAL_DAY = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+
+
+def _require_day(day: object) -> str:
+    if not isinstance(day, str) or _CANONICAL_DAY.fullmatch(day) is None:
+        raise PolicyError("day must be YYYY-MM-DD")
+    try:
+        date.fromisoformat(day)
+    except ValueError:
+        raise PolicyError("day must be YYYY-MM-DD") from None
+    return day
 
 
 class Ledger:
@@ -49,13 +64,17 @@ class Ledger:
         approval_above_cents: Optional[int] = None,
     ) -> Mandate:
         mandate = self._mandate_for_principal(principal_id, agent_id)
+        require_cents(max_per_job_cents)
+        require_cents(max_daily_cents)
         if max_per_job_cents < 0 or max_daily_cents < 0:
             raise PolicyError("caps cannot be negative")
+        if approval_above_cents is not None:
+            require_cents(approval_above_cents)
+            if approval_above_cents < 0:
+                raise PolicyError("approval threshold cannot be negative")
         mandate.max_per_job_cents = max_per_job_cents
         mandate.max_daily_cents = max_daily_cents
         if approval_above_cents is not None:
-            if approval_above_cents < 0:
-                raise PolicyError("approval threshold cannot be negative")
             mandate.approval_above_cents = approval_above_cents
         self._log(
             "set_caps",
@@ -73,6 +92,7 @@ class Ledger:
         return mandate
 
     def deposit(self, account_id: str, cents: int) -> int:
+        require_cents(cents)
         if cents <= 0:
             raise PolicyError("deposit must be positive")
         self.balances[account_id] += cents
@@ -82,6 +102,7 @@ class Ledger:
     def list_skill(
         self, payee_id: str, name: str, price_cents: int, terms: str
     ) -> SkillListing:
+        require_cents(price_cents)
         listing = SkillListing(self._next("lst"), payee_id, name, price_cents, terms)
         self.listings[listing.listing_id] = listing
         self._log("list_skill", payee_id, listing.listing_id, price_cents=price_cents)
@@ -96,8 +117,10 @@ class Ledger:
         day: str,
         listing_id: Optional[str] = None,
     ) -> Job:
+        require_cents(amount_cents)
         if amount_cents <= 0:
             raise PolicyError("amount must be positive")
+        day = _require_day(day)
         if buyer_id == payee_id:
             raise PolicyError("an agent cannot hire itself")
         mandate = self.mandates.get(buyer_id)
@@ -150,6 +173,10 @@ class Ledger:
         mandate = self.mandates[job.buyer_id]
         if mandate.frozen:
             raise PolicyError("mandate is frozen")
+        # Open hires are not locked yet, so the hire-time check cannot see them.
+        spent = self._locked_today(job.buyer_id, job.day)
+        if spent + job.amount_cents > mandate.max_daily_cents:
+            raise PolicyError("over daily cap")
         if self.balances[job.buyer_id] < job.amount_cents:
             raise PolicyError("insufficient balance")
         self.balances[job.buyer_id] -= job.amount_cents
@@ -192,6 +219,7 @@ class Ledger:
         job = self._job(job_id)
         self._mandate_for_principal(principal_id, job.buyer_id)
         self._expect(job, EscrowState.DISPUTED)
+        require_cents(payee_cents)
         if payee_cents < 0 or payee_cents > job.amount_cents:
             raise PolicyError("resolution split is outside the locked amount")
         refund = job.amount_cents - payee_cents

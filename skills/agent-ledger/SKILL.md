@@ -11,6 +11,7 @@ Reference policy layer for agent spend. It does not move real money. Amounts are
 
 - A principal owns the mandate. The agent cannot raise its cap, unfreeze itself, or release its own job.
 - Refuse a hire over the per-job cap, over the remaining daily cap, or to a payee outside the allow-list.
+- Pass `day` as `YYYY-MM-DD`. Any other spelling is refused.
 - If the amount is above approval_above_cents, leave the job unapproved. Do not fund it.
 - Reputation comes only from released, resolved, and refunded jobs. Open or funded work is not a score.
 - Never tell the user a balance is a real wallet. This package is a simulated ledger.

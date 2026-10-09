@@ -31,6 +31,10 @@ A mandate is the only spending authority.
 - allowed_payees: empty means any payee; otherwise an allow-list
 - frozen: a frozen mandate rejects every new lock
 
+A hire names its day as `YYYY-MM-DD`. Any other string is refused, so a second spelling cannot open a second daily budget.
+
+`max_daily_cents` bounds cents locked that day. `hire` refuses when cents already locked that day plus the new amount would exceed it. `fund` checks again: an open job is not locked yet, and funding several open jobs cannot push the day over the cap.
+
 Cap changes are principal actions and are appended to the audit log.
 
 ## Escrow states
