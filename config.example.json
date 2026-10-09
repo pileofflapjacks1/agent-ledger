@@ -1,0 +1,9 @@
+{
+  "agent_id": "buyer-bot",
+  "principal_id": "joe",
+  "max_per_job_cents": 2000,
+  "max_daily_cents": 5000,
+  "approval_above_cents": 1000,
+  "allowed_payees": ["research-bot"],
+  "frozen": false
+}
