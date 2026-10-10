@@ -17,18 +17,18 @@ RULES = (
 TOOLS = [
     {
         "name": "hire",
-        "description": "Open an escrow job on the local ledger. " + RULES,
+        "description": (
+            "Open an escrow job for the configured agent. The server stamps the day. " + RULES
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "buyer_id": {"type": "string"},
                 "payee_id": {"type": "string"},
                 "amount_cents": {"type": "integer"},
                 "terms": {"type": "string"},
-                "day": {"type": "string", "description": "YYYY-MM-DD"},
                 "listing_id": {"type": "string"},
             },
-            "required": ["buyer_id", "payee_id", "amount_cents", "terms", "day"],
+            "required": ["payee_id", "amount_cents", "terms"],
             "additionalProperties": False,
         },
     },
@@ -53,19 +53,6 @@ TOOLS = [
                 "note": {"type": "string"},
             },
             "required": ["payee_id", "job_id"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "release",
-        "description": "Principal releases a delivered job to the payee. " + RULES,
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "principal_id": {"type": "string"},
-                "job_id": {"type": "string"},
-            },
-            "required": ["principal_id", "job_id"],
             "additionalProperties": False,
         },
     },
@@ -95,11 +82,9 @@ TOOLS = [
 def call_tool(name: str, arguments: dict) -> tuple[object, bool]:
     if name == "hire":
         body = {
-            "buyer_id": arguments.get("buyer_id"),
             "payee_id": arguments.get("payee_id"),
             "amount_cents": arguments.get("amount_cents"),
             "terms": arguments.get("terms"),
-            "day": arguments.get("day"),
         }
         if arguments.get("listing_id"):
             body["listing_id"] = arguments["listing_id"]
@@ -111,12 +96,6 @@ def call_tool(name: str, arguments: dict) -> tuple[object, bool]:
         if "note" in arguments:
             body["note"] = arguments["note"]
         return _request("POST", "/deliver", body)
-    if name == "release":
-        return _request(
-            "POST",
-            "/release",
-            {"principal_id": arguments.get("principal_id"), "job_id": arguments.get("job_id")},
-        )
     if name == "reputation":
         return _request("GET", "/reputation", query={"payee_id": arguments.get("payee_id", "")})
     if name == "get_job":
@@ -133,6 +112,9 @@ def _request(
         url += "?" + urllib.parse.urlencode(query)
     data = None if body is None else json.dumps(body).encode("utf-8")
     headers = {"Content-Type": "application/json"} if data is not None else {}
+    token = os.environ.get("LEDGER_AGENT_TOKEN", "")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=10) as response:

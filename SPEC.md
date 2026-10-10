@@ -29,13 +29,17 @@ A mandate is the only spending authority.
 - max_daily_cents: hard ceiling for funds locked today
 - approval_above_cents: jobs above this stay pending until the principal approves
 - allowed_payees: empty means any payee; otherwise an allow-list
-- frozen: a frozen mandate rejects every new lock
+- frozen: rejects new locks, `fund`, `approve`, and `release`. `resolve` is refused when the payee would be paid. A full refund of a disputed job is still allowed, and `deliver` is still allowed. `dispute` stays available so that refund can be opened.
 
-A hire names its day as `YYYY-MM-DD`. Any other string is refused, so a second spelling cannot open a second daily budget.
+A hire records its day as `YYYY-MM-DD`. The HTTP door stamps that day from its clock and ignores a day sent by the caller. The library still refuses any other spelling when a host passes `day` directly.
 
-`max_daily_cents` bounds cents locked that day. `hire` refuses when cents already locked that day plus the new amount would exceed it. `fund` checks again: an open job is not locked yet, and funding several open jobs cannot push the day over the cap.
+`max_daily_cents` bounds cents locked that day. `hire` refuses when cents already locked that day plus the new amount would exceed it. `fund` checks again: an open job is not locked yet, and funding several open jobs cannot push the day over the cap. `fund` also re-reads the per-job cap and the approval threshold, so a tighter mandate still refuses the lock. An auto-approved job needs `approve` if the threshold has dropped below the amount.
 
 Cap changes are principal actions and are appended to the audit log.
+
+Each audit entry stores the hash of the previous entry. The first previous hash is empty. `python -m agent_ledger verify` recomputes the chain and prints the log. It does not call a model. A corrupt file or a broken chain refuses to start and is not overwritten. A missing file still starts empty.
+
+A refusal for the per-job cap, the daily cap, a frozen mandate, or a missing approval appends `deny` with that rule and does not change balances. Other policy errors are not written.
 
 ## Escrow states
 

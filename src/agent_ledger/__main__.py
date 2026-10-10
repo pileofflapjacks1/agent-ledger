@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 
+from agent_ledger.audit import ChainError, format_audit, verify_chain
 from agent_ledger.ledger import Ledger
 from agent_ledger.models import Mandate
+from agent_ledger.store import JsonStore, LedgerFileError
 
 
 def demo() -> dict:
@@ -46,12 +50,29 @@ def demo() -> dict:
     }
 
 
+def verify(path: str) -> int:
+    """Recompute the audit chain and print the log. Does not rewrite the file."""
+    store = JsonStore(path)
+    try:
+        ledger = store.load()
+        verify_chain(ledger.audit)
+    except (LedgerFileError, ChainError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    sys.stdout.write(format_audit(ledger.audit))
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Agent ledger reference implementation")
-    parser.add_argument("command", choices=["demo"])
+    parser.add_argument("command", choices=["demo", "verify"])
+    parser.add_argument("path", nargs="?", default=None)
     args = parser.parse_args()
     if args.command == "demo":
         print(json.dumps(demo(), indent=2))
+        return
+    path = args.path or os.environ.get("LEDGER_PATH", "./ledger.json")
+    raise SystemExit(verify(path))
 
 
 if __name__ == "__main__":

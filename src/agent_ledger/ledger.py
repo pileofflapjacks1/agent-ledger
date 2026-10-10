@@ -5,6 +5,7 @@ from collections import defaultdict
 from datetime import date
 from typing import Optional
 
+from agent_ledger.audit import DENIAL_RULES, stamp
 from agent_ledger.models import (
     SETTLED,
     Audit,
@@ -46,7 +47,13 @@ class Ledger:
         return f"{prefix}_{self._seq}"
 
     def _log(self, action: str, actor: str, detail: str, **extra: object) -> None:
-        self.audit.append(Audit(action, actor, detail, extra))
+        prev_hash = self.audit[-1].entry_hash if self.audit else ""
+        self.audit.append(stamp(Audit(action, actor, detail, dict(extra)), prev_hash))
+
+    def record_denial(self, actor: str, detail: str, rule: str) -> None:
+        if rule not in DENIAL_RULES:
+            raise PolicyError("unknown denial rule")
+        self._log("deny", actor, detail, rule=rule)
 
     def open_mandate(self, mandate: Mandate) -> Mandate:
         if mandate.agent_id in self.mandates:
@@ -162,17 +169,21 @@ class Ledger:
         if mandate.frozen:
             raise PolicyError("mandate is frozen")
         job.approved = True
+        job.principal_approved = True
         self._log("approve", principal_id, job_id)
         return job
 
     def fund(self, job_id: str) -> Job:
         job = self._job(job_id)
         self._expect(job, EscrowState.OPEN)
-        if not job.approved:
-            raise PolicyError("job needs principal approval before funding")
         mandate = self.mandates[job.buyer_id]
         if mandate.frozen:
             raise PolicyError("mandate is frozen")
+        if job.amount_cents > mandate.max_per_job_cents:
+            raise PolicyError("over per-job cap")
+        # Hire-time approval is not sticky. A tighter threshold still needs the principal.
+        if job.amount_cents > mandate.approval_above_cents and not job.principal_approved:
+            raise PolicyError("job needs principal approval before funding")
         # Open hires are not locked yet, so the hire-time check cannot see them.
         spent = self._locked_today(job.buyer_id, job.day)
         if spent + job.amount_cents > mandate.max_daily_cents:
@@ -196,8 +207,10 @@ class Ledger:
 
     def release(self, principal_id: str, job_id: str) -> Job:
         job = self._job(job_id)
-        self._mandate_for_principal(principal_id, job.buyer_id)
+        mandate = self._mandate_for_principal(principal_id, job.buyer_id)
         self._expect(job, EscrowState.DELIVERED)
+        if mandate.frozen:
+            raise PolicyError("mandate is frozen")
         job.state = EscrowState.RELEASED
         job.payee_cents = job.amount_cents
         self.balances[job.payee_id] += job.amount_cents
@@ -205,6 +218,7 @@ class Ledger:
         return job
 
     def dispute(self, principal_id: str, job_id: str, note: str) -> Job:
+        # Dispute stays available while frozen so a delivered job can still be refunded.
         job = self._job(job_id)
         self._mandate_for_principal(principal_id, job.buyer_id)
         if job.state not in {EscrowState.FUNDED, EscrowState.DELIVERED}:
@@ -217,11 +231,14 @@ class Ledger:
 
     def resolve(self, principal_id: str, job_id: str, payee_cents: int) -> Job:
         job = self._job(job_id)
-        self._mandate_for_principal(principal_id, job.buyer_id)
+        mandate = self._mandate_for_principal(principal_id, job.buyer_id)
         self._expect(job, EscrowState.DISPUTED)
         require_cents(payee_cents)
         if payee_cents < 0 or payee_cents > job.amount_cents:
             raise PolicyError("resolution split is outside the locked amount")
+        # Frozen stops payout. A zero payee share refunds the buyer and still runs.
+        if mandate.frozen and payee_cents > 0:
+            raise PolicyError("mandate is frozen")
         refund = job.amount_cents - payee_cents
         job.payee_cents = payee_cents
         job.refund_cents = refund

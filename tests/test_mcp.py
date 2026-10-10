@@ -6,7 +6,14 @@ import subprocess
 import sys
 
 from agent_ledger.mcp_server import TOOLS
-from tests.support import ROOT, request_json, running_server, seed_balance, write_config
+from tests.support import (
+    AGENT_TOKEN,
+    ROOT,
+    request_json,
+    running_server,
+    seed_balance,
+    write_config,
+)
 
 RULES = (
     "do not hire unless hire returns approved or the principal has approved",
@@ -17,7 +24,10 @@ RULES = (
 
 def test_tool_descriptions_state_the_rules():
     names = [tool["name"] for tool in TOOLS]
-    assert names == ["hire", "fund", "deliver", "release", "reputation", "get_job"]
+    assert names == ["hire", "fund", "deliver", "reputation", "get_job"]
+    hire = next(tool for tool in TOOLS if tool["name"] == "hire")
+    assert "day" not in hire["inputSchema"]["properties"]
+    assert "buyer_id" not in hire["inputSchema"]["properties"]
     for tool in TOOLS:
         text = tool["description"].lower()
         for rule in RULES:
@@ -36,6 +46,7 @@ def test_mcp_tools_call_the_http_service(tmp_path):
             env={
                 **os.environ,
                 "LEDGER_URL": f"http://127.0.0.1:{port}",
+                "LEDGER_AGENT_TOKEN": AGENT_TOKEN,
             },
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -71,7 +82,6 @@ def test_mcp_tools_call_the_http_service(tmp_path):
                 "hire",
                 "fund",
                 "deliver",
-                "release",
                 "reputation",
                 "get_job",
             ]
@@ -83,11 +93,11 @@ def test_mcp_tools_call_the_http_service(tmp_path):
                     "params": {
                         "name": "hire",
                         "arguments": {
-                            "buyer_id": "buyer-bot",
                             "payee_id": "research-bot",
                             "amount_cents": 800,
                             "terms": "under the cap",
-                            "day": "2026-10-08",
+                            "day": "2099-01-01",
+                            "buyer_id": "someone-else",
                         },
                     },
                 }
@@ -96,6 +106,8 @@ def test_mcp_tools_call_the_http_service(tmp_path):
             job = json.loads(hired["result"]["content"][0]["text"])
             assert job["approved"] is True
             assert job["state"] == "open"
+            assert job["buyer_id"] == "buyer-bot"
+            assert job["day"] == "2026-10-08"
             refused = rpc(
                 {
                     "jsonrpc": "2.0",
@@ -104,11 +116,9 @@ def test_mcp_tools_call_the_http_service(tmp_path):
                     "params": {
                         "name": "hire",
                         "arguments": {
-                            "buyer_id": "buyer-bot",
                             "payee_id": "research-bot",
                             "amount_cents": 9_000,
                             "terms": "over the cap",
-                            "day": "2026-10-08",
                         },
                     },
                 }

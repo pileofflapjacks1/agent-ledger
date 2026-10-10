@@ -11,8 +11,10 @@ No real funds move. Amounts are integer cents so a later adapter can map them to
 - A principal owns the mandate. The agent cannot raise its own cap.
 - Per-job cap, daily cap, payee allow-list, and a freeze switch are hard refusals, not prompt text. Funding checks the daily cap again. The day is `YYYY-MM-DD`.
 - Jobs over the approval threshold cannot be funded until the principal approves.
+- Freeze also stops `fund` and `release`. A disputed job can still be refunded to the buyer in full.
 - Escrow runs open, funded, delivered, then released, refunded, or resolved.
 - Reputation ignores anything that is not settled.
+- The audit log is a hash chain. `python -m agent_ledger verify` recomputes it and prints the log. No model is on that path. A corrupt file or a broken chain refuses to start and is not overwritten. Refusals for the per-job cap, the daily cap, freeze, and approval are stored as `deny` and do not move balances.
 
 ## How it works
 
@@ -28,7 +30,7 @@ flowchart LR
   disk[(ledger.json)]
   cfg["config.json"]
 
-  grok -->|"hire, fund, deliver, release, reputation, get_job"| mcp
+  grok -->|"hire, fund, deliver, reputation, get_job"| mcp
   mcp -->|"LEDGER_URL"| http
   curl --> http
   cfg -->|"read at startup"| http
@@ -37,16 +39,17 @@ flowchart LR
   disk -->|"load on startup"| http
 ```
 
-`approve`, `dispute`, and `resolve` are HTTP only. The hiring agent does not get those tools. The service does not authenticate the caller. It is bound to localhost. `principal_id` is still checked inside the library on approve, release, dispute, and resolve.
+The server stamps the UTC accounting day and ignores `day` and `buyer_id` on `hire`. `hire`, `fund`, and `deliver` require `LEDGER_AGENT_TOKEN`. `approve`, `release`, `dispute`, `resolve`, and `freeze` require `LEDGER_PRINCIPAL_TOKEN`. The MCP process has the agent token only. A guessed `principal_id` in a body is ignored. The service is bound to localhost.
 
 ### Startup
 
-`LEDGER_PATH` defaults to `./ledger.json`. `LEDGER_CONFIG` defaults to `./config.json`. A missing or unreadable ledger file is an empty ledger. The next save replaces it with a full snapshot.
+`LEDGER_PATH` defaults to `./ledger.json`. `LEDGER_CONFIG` defaults to `./config.json`. A missing ledger file starts empty. A corrupt file, an unreadable file, or a broken audit chain stops the process and is left in place. A `ledger.json` written before the hash chain will not load. Move it aside if you do not need the old file. The server will not overwrite it.
 
 ```mermaid
 flowchart TD
-  start["Process starts"] --> load{"ledger.json readable?"}
-  load -->|"missing or corrupt"| empty["Empty ledger"]
+  start["Process starts"] --> load{"ledger.json present?"}
+  load -->|"missing"| empty["Empty ledger"]
+  load -->|"corrupt or broken audit chain"| stopfile["Exit. The file is left as it is"]
   load -->|"yes"| restore["Restore mandates, listings, jobs, balances, audit, and id sequence"]
   empty --> hascfg{"config.json present?"}
   restore --> hascfg
@@ -67,32 +70,34 @@ The allow-list is stored only by `open_mandate`. A later edit to `allowed_payees
 
 ### One job
 
-Checks run in this order. The first failure is `403` with `{"error": "..."}` and the ledger is not saved. An unknown `job_id` is `404`. `400` means the JSON body is missing a field. A successful mutation is written to disk before the response is sent.
+Checks run in this order. The first failure is `403` with `{"error": "..."}`. An unknown `job_id` is `404`. `400` means the JSON body is missing a field. A successful mutation is written to disk before the response is sent. A refusal for the per-job cap, the daily cap, a frozen mandate, or a missing approval appends `deny` and saves that log. Balances do not change. Unauthorized calls and other policy errors are not written.
 
 ```mermaid
 flowchart TD
-  hire["POST /hire"] --> hchk{"Integer cents, real YYYY-MM-DD, not self-hire, mandate exists and is not frozen, under per-job and daily caps, payee allowed"}
-  hchk -->|"no"| deny["403, no save"]
+  hire["POST /hire with the agent token"] --> hchk{"Integer cents, server-stamped day, not self-hire, mandate exists and is not frozen, under per-job and daily caps, payee allowed"}
+  hchk -->|"no"| deny["403. per-job, daily, and frozen append deny"]
   hchk -->|"yes"| threshold{"amount greater than approval_above_cents?"}
   threshold -->|"yes"| pending["state open, approved false"]
   threshold -->|"no"| ready["state open, approved true"]
   pending --> saved["Save, return the job"]
   ready --> saved
   saved --> fund["POST /fund"]
-  fund --> gate{"Job is open and approved?"}
-  gate -->|"needs approval"| wait["403. Principal POST /approve, then fund again"]
+  fund --> gate{"Not frozen, and the current per-job cap and approval threshold allow the lock?"}
+  gate -->|"frozen or over the per-job cap"| deny
+  gate -->|"needs approval"| wait["403 and a deny entry. Principal POST /approve, then fund again"]
   wait --> fund
   gate -->|"yes"| money{"Daily cap still holds and buyer balance covers the lock?"}
-  money -->|"no"| deny
+  money -->|"over the daily cap"| deny
+  money -->|"balance too small"| quiet["403, no deny entry"]
   money -->|"yes"| locked["Debit the buyer. state funded. Save"]
   locked -->|"payee POST /deliver"| delivered["state delivered. Save"]
-  delivered -->|"principal POST /release"| released["Payee receives the full amount. state released"]
+  delivered -->|"principal POST /release while not frozen"| released["Payee receives the full amount. state released"]
   delivered -->|"principal POST /dispute"| disputed["state disputed"]
   locked -->|"principal POST /dispute"| disputed
   disputed --> split{"POST /resolve payee_cents"}
-  split -->|"0"| refunded["Buyer is refunded. state refunded"]
-  split -->|"part of the lock"| resolved["Split payee and buyer. state resolved"]
-  split -->|"the full lock"| released
+  split -->|"0, including while frozen"| refunded["Buyer is refunded. state refunded"]
+  split -->|"part of the lock, and not frozen"| resolved["Split payee and buyer. state resolved"]
+  split -->|"the full lock, and not frozen"| released
 ```
 
 `fund` counts cents already locked that day, not other jobs that are still `open`. Several open hires can exist. Funding them cannot push the day over `max_daily_cents`.
@@ -114,6 +119,8 @@ stateDiagram-v2
 
 A full award from `resolve` is stored as `released`, so it counts in `release_rate`. `volume_cents` is the payee's settled cents, not the original lock when part of it was refunded.
 
+While the mandate is frozen, `fund` and `release` are refused, and `resolve` is refused when `payee_cents` is greater than zero. The principal can still `dispute`, and can `resolve` with `payee_cents` 0, which refunds the buyer. `deliver` is still allowed.
+
 ## Run
 
 From the repo root, with Python 3.11+:
@@ -122,24 +129,33 @@ From the repo root, with Python 3.11+:
 pip install -e ".[dev]"
 python -m pytest
 python -m agent_ledger demo
+python -m agent_ledger verify
 cp config.example.json config.json
+export LEDGER_AGENT_TOKEN="choose-an-agent-token"
+export LEDGER_PRINCIPAL_TOKEN="choose-a-different-principal-token"
 python -m agent_ledger.server
 ```
 
-The server listens on `127.0.0.1` port `8787`. `LEDGER_PATH` defaults to `./ledger.json`. `PORT` defaults to `8787`. `LEDGER_CONFIG` defaults to `./config.json`.
+The server listens on `127.0.0.1` port `8787`. `LEDGER_PATH` defaults to `./ledger.json`. `PORT` defaults to `8787`. `LEDGER_CONFIG` defaults to `./config.json`. `LEDGER_TODAY` pins the accounting day. Leave it unset and the server uses the UTC date. The agent token acts only as `agent_id` from `config.json`. Keep the principal token out of the MCP process.
+
+`python -m agent_ledger verify` reads `LEDGER_PATH` or `./ledger.json`, recomputes the audit chain, and prints the log. It exits non-zero when the chain is broken or the file is corrupt, and it does not rewrite the file. The chain covers the audit log. It does not re-derive balances from that log.
+
+Run the HTTP service as a different user from the agent. Give the agent `LEDGER_URL` and `LEDGER_AGENT_TOKEN` only. Do not give it `LEDGER_PRINCIPAL_TOKEN` or write access to `ledger.json`. The code cannot enforce a file permission the agent process does not have.
 
 In a second shell, from the repo root:
 
 ```bash
+export LEDGER_AGENT_TOKEN="choose-an-agent-token"
 python -m agent_ledger.mcp_server
 ```
 
-Hire under the example cap. 800 cents is inside the 2000 cent job cap and inside the 1000 cent approval threshold, so the job comes back approved:
+Hire under the example cap. 800 cents is inside the 2000 cent job cap and inside the 1000 cent approval threshold, so the job comes back approved. The server stamps the day:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8787/hire \
+  -H "authorization: Bearer $LEDGER_AGENT_TOKEN" \
   -H 'content-type: application/json' \
-  -d '{"buyer_id":"buyer-bot","payee_id":"research-bot","amount_cents":800,"terms":"Watch one drop window and return the link.","day":"2026-10-08"}'
+  -d '{"payee_id":"research-bot","amount_cents":800,"terms":"Watch one drop window and return the link."}'
 ```
 
 Edit caps or `frozen` in `config.json` and restart the server to apply them. The allow-list is fixed when the mandate is first opened. Only the `principal_id` in that file can change a cap. A request cannot raise one.

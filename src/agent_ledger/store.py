@@ -5,8 +5,19 @@ import os
 import threading
 from pathlib import Path
 
+from agent_ledger.audit import ChainError, verify_chain
 from agent_ledger.ledger import Ledger
 from agent_ledger.models import Audit, EscrowState, Job, Mandate, PolicyError, SkillListing
+
+
+class LedgerFileError(Exception):
+    """The ledger file exists but cannot be trusted. Callers must not overwrite it."""
+
+
+def _flag(value: object, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} must be a boolean")
+    return value
 
 
 def _int(value: object, label: str) -> int:
@@ -49,6 +60,7 @@ def _snapshot(ledger: Ledger) -> dict:
                 "terms": job.terms,
                 "state": job.state.value,
                 "approved": job.approved,
+                "principal_approved": job.principal_approved,
                 "disputed": job.disputed,
                 "payee_cents": job.payee_cents,
                 "refund_cents": job.refund_cents,
@@ -65,6 +77,8 @@ def _snapshot(ledger: Ledger) -> dict:
                 "actor": entry.actor,
                 "detail": entry.detail,
                 "extra": dict(entry.extra),
+                "prev_hash": entry.prev_hash,
+                "entry_hash": entry.entry_hash,
             }
             for entry in ledger.audit
         ],
@@ -114,12 +128,32 @@ def _load_job(raw: object) -> Job:
         terms=raw["terms"],
         state=EscrowState(raw["state"]),
         approved=raw["approved"],
+        principal_approved=_flag(raw.get("principal_approved", False), "principal_approved"),
         disputed=raw["disputed"],
         payee_cents=_int(raw["payee_cents"], "payee_cents"),
         refund_cents=_int(raw["refund_cents"], "refund_cents"),
         day=raw["day"],
         listing_id=raw.get("listing_id"),
         note=raw.get("note", ""),
+    )
+
+
+def _load_audit(raw: object) -> Audit:
+    if not isinstance(raw, dict):
+        raise ValueError("audit entry must be an object")
+    extra = raw.get("extra", {})
+    if not isinstance(extra, dict):
+        raise ValueError("audit entry must be an object")
+    for key in ("action", "actor", "detail", "prev_hash", "entry_hash"):
+        if not isinstance(raw.get(key), str):
+            raise ValueError(f"audit {key} must be a string")
+    return Audit(
+        raw["action"],
+        raw["actor"],
+        raw["detail"],
+        dict(extra),
+        raw["prev_hash"],
+        raw["entry_hash"],
     )
 
 
@@ -152,32 +186,37 @@ def _fill(ledger: Ledger, data: object) -> None:
             raise ValueError("job key does not match job_id")
         if not isinstance(job.approved, bool) or not isinstance(job.disputed, bool):
             raise ValueError("job flags must be booleans")
+        if not isinstance(job.principal_approved, bool):
+            raise ValueError("job flags must be booleans")
         ledger.jobs[job_id] = job
     for account_id, cents in balances.items():
         ledger.balances[account_id] = _int(cents, "balance")
     for raw in audit:
-        if not isinstance(raw, dict) or not isinstance(raw.get("extra", {}), dict):
-            raise ValueError("audit entry must be an object")
-        ledger.audit.append(
-            Audit(raw["action"], raw["actor"], raw["detail"], dict(raw.get("extra", {})))
-        )
+        ledger.audit.append(_load_audit(raw))
+    verify_chain(ledger.audit)
 
 
 class JsonStore:
-    """Persist one ledger as JSON. A missing or unreadable file is an empty ledger."""
+    """Persist one ledger as JSON. A missing file is an empty ledger."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
 
     def load(self) -> Ledger:
+        # A missing file may start empty. An existing file that does not verify must
+        # not be replaced by a later save, so a bad file raises instead of loading empty.
         if not self.path.is_file():
             return Ledger()
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            text = self.path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise LedgerFileError(f"refusing to load {self.path}: {exc}") from exc
+        try:
+            data = json.loads(text)
             ledger = Ledger()
             _fill(ledger, data)
-        except (OSError, json.JSONDecodeError, ValueError, TypeError, KeyError, PolicyError):
-            return Ledger()
+        except (json.JSONDecodeError, ValueError, TypeError, KeyError, PolicyError, ChainError) as exc:
+            raise LedgerFileError(f"refusing to load {self.path}: {exc}") from exc
         return ledger
 
     def save(self, ledger: Ledger) -> None:

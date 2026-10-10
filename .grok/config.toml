@@ -1,4 +1,5 @@
 [mcp_servers.agent-ledger]
 command = "python3"
 args = ["-m", "agent_ledger.mcp_server"]
+# Set LEDGER_AGENT_TOKEN in this env locally. Do not put LEDGER_PRINCIPAL_TOKEN here.
 env = { LEDGER_URL = "http://127.0.0.1:8787", PYTHONPATH = "src" }

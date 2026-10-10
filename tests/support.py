@@ -15,6 +15,9 @@ from agent_ledger.store import JsonStore
 
 ROOT = Path(__file__).resolve().parents[1]
 
+AGENT_TOKEN = "agent-test-token"
+PRINCIPAL_TOKEN = "principal-test-token"
+
 EXAMPLE = {
     "agent_id": "buyer-bot",
     "principal_id": "joe",
@@ -45,7 +48,13 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
-def request_json(port: int, method: str, path: str, body: dict | None = None):
+def request_json(
+    port: int,
+    method: str,
+    path: str,
+    body: dict | None = None,
+    token: str | None = AGENT_TOKEN,
+):
     data = None if body is None else json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}",
@@ -54,6 +63,8 @@ def request_json(port: int, method: str, path: str, body: dict | None = None):
     )
     if data is not None:
         req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
     try:
         with urllib.request.urlopen(req, timeout=2) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
@@ -88,6 +99,9 @@ def running_server(directory: Path, ledger_path: Path, config_path: Path):
     env["PORT"] = str(port)
     env["LEDGER_PATH"] = str(ledger_path)
     env["LEDGER_CONFIG"] = str(config_path)
+    env["LEDGER_AGENT_TOKEN"] = AGENT_TOKEN
+    env["LEDGER_PRINCIPAL_TOKEN"] = PRINCIPAL_TOKEN
+    env["LEDGER_TODAY"] = "2026-10-08"
     proc = subprocess.Popen(
         [sys.executable, "-m", "agent_ledger.server"],
         cwd=directory,

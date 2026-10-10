@@ -72,6 +72,7 @@ class Job:
     terms: str
     state: EscrowState = EscrowState.OPEN
     approved: bool = False
+    principal_approved: bool = False
     disputed: bool = False
     payee_cents: int = 0
     refund_cents: int = 0
@@ -109,3 +110,5 @@ class Audit:
     actor: str
     detail: str
     extra: dict = field(default_factory=dict)
+    prev_hash: str = ""
+    entry_hash: str = ""

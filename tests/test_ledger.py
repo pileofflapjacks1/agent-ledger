@@ -1,5 +1,6 @@
 import pytest
 
+from agent_ledger.audit import verify_chain
 from agent_ledger.ledger import Ledger
 from agent_ledger.models import EscrowState, Mandate, PolicyError
 
@@ -52,6 +53,38 @@ def test_allow_list_and_self_hire():
         ledger.hire("buyer", "stranger", 100, "nope", "2026-10-08")
     with pytest.raises(PolicyError, match="itself"):
         ledger.hire("buyer", "buyer", 100, "nope", "2026-10-08")
+
+
+def test_fund_rereads_tighter_caps(tmp_path):
+    ledger = setup()
+    under = ledger.hire("buyer", "seller", 300, "was inside the caps", "2026-10-08")
+    assert under.approved is True
+    assert under.principal_approved is False
+    ledger.set_caps("human", "buyer", 200, 1_500, 400)
+    with pytest.raises(PolicyError, match="per-job"):
+        ledger.fund(under.job_id)
+    assert under.state is EscrowState.OPEN
+    assert ledger.balances["buyer"] == 5_000
+
+    widened = Ledger()
+    widened.open_mandate(mandate())
+    widened.deposit("buyer", 5_000)
+    job = widened.hire("buyer", "seller", 300, "threshold drop", "2026-10-08")
+    widened.set_caps("human", "buyer", 1_000, 1_500, 100)
+    with pytest.raises(PolicyError, match="approval"):
+        widened.fund(job.job_id)
+    widened.approve("human", job.job_id)
+    widened.fund(job.job_id)
+    assert job.state is EscrowState.FUNDED
+    assert job.principal_approved is True
+
+    from agent_ledger.store import JsonStore
+
+    path = tmp_path / "ledger.json"
+    JsonStore(path).save(widened)
+    restored = JsonStore(path).load().jobs[job.job_id]
+    assert restored.principal_approved is True
+    assert restored.state is EscrowState.FUNDED
 
 
 def test_approval_gate_blocks_fund():
@@ -187,3 +220,43 @@ def test_freeze_stops_new_locks_and_pnl_tracks_lock():
     job = ledger.hire("buyer", "seller", 100, "go", "2026-10-08")
     ledger.fund(job.job_id)
     assert ledger.pnl("buyer")["locked_cents"] == 100
+
+
+def test_freeze_halts_payout_and_allows_a_full_refund():
+    ledger = setup()
+    job = ledger.hire("buyer", "seller", 100, "go", "2026-10-08")
+    waiting = ledger.hire("buyer", "seller", 100, "later", "2026-10-08")
+    ledger.fund(job.job_id)
+    ledger.freeze("human", "buyer")
+    with pytest.raises(PolicyError, match="frozen"):
+        ledger.fund(waiting.job_id)
+    assert ledger.balances["buyer"] == 4_900
+    ledger.deliver("seller", job.job_id, "done")
+    with pytest.raises(PolicyError, match="frozen"):
+        ledger.release("human", job.job_id)
+    assert job.state is EscrowState.DELIVERED
+    assert ledger.balances["seller"] == 0
+    ledger.dispute("human", job.job_id, "stop")
+    with pytest.raises(PolicyError, match="frozen"):
+        ledger.resolve("human", job.job_id, job.amount_cents)
+    assert job.state is EscrowState.DISPUTED
+    assert ledger.balances["buyer"] == 4_900
+    ledger.resolve("human", job.job_id, 0)
+    assert job.state is EscrowState.REFUNDED
+    assert ledger.balances["buyer"] == 5_000
+    assert ledger.balances["seller"] == 0
+
+
+def test_record_denial_appends_the_rule_without_moving_balances():
+    ledger = setup()
+    before = dict(ledger.balances)
+    ledger.record_denial("buyer", "over per-job cap", "per-job")
+    assert dict(ledger.balances) == before
+    assert ledger.jobs == {}
+    denial = ledger.audit[-1]
+    assert denial.action == "deny"
+    assert denial.actor == "buyer"
+    assert denial.extra["rule"] == "per-job"
+    verify_chain(ledger.audit)
+    with pytest.raises(PolicyError, match="unknown denial rule"):
+        ledger.record_denial("buyer", "nope", "allow-list")
